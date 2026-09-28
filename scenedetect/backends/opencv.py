@@ -54,6 +54,22 @@ NON_VIDEO_FILE_INPUT_IDENTIFIERS = (
 )
 
 
+OPT_10: int = 2
+
+
+def _opt_8() -> int:
+    try:
+        return int(os.environ.get("SCENEDETECT_OPT_2", OPT_10))
+    except ValueError:
+        return OPT_10
+
+
+def _opt_9(cap: cv2.VideoCapture) -> None:
+    threads = _opt_8()
+    if threads > 0 and hasattr(cv2, "CAP_PROP_N_THREADS"):
+        cap.set(cv2.CAP_PROP_N_THREADS, threads)
+
+
 def _get_aspect_ratio(cap: cv2.VideoCapture, epsilon: float = 0.0001) -> float:
     """Display/pixel aspect ratio of the VideoCapture as a float (1.0 represents square pixels)."""
     # Versions of OpenCV < 3.4.1 do not support this, so we fall back to 1.0.
@@ -337,6 +353,7 @@ class VideoStreamCv2(VideoStream):
             raise VideoOpenFailure(
                 "Ensure file is valid video and system dependencies are up to date.\n"
             )
+        _opt_9(cap)
 
         # Display an error if the video codec type seems unsupported (#86) as this indicates
         # potential video corruption, or may explain missing frames. We only perform this check

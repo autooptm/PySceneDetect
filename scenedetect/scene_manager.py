@@ -77,6 +77,7 @@ analysis of the video.
 """
 
 import logging
+import os
 import queue
 import sys
 import threading
@@ -98,6 +99,7 @@ from scenedetect.detector import SceneDetector
 
 # TODO(v0.8): Remove the import * below, for backwards compatibility with v0.6 only.
 from scenedetect.output import *  # noqa: F403
+from scenedetect import _opt_score as opt_13
 from scenedetect.platform import tqdm
 from scenedetect.stats_manager import StatsManager
 from scenedetect.video_stream import VideoStream
@@ -562,6 +564,10 @@ class SceneManager:
                 dynamic_ncols=True,
             )
 
+        scores = self._opt_14(video, frame_skip, downscale_factor, end_time, callback)
+        if scores is not None:
+            return self._opt_15(scores, video, start_frame_num, progress_bar)
+
         frame_queue = queue.Queue(MAX_FRAME_QUEUE_LENGTH)
         self._stop.clear()
         decode_thread = threading.Thread(
@@ -621,6 +627,72 @@ class SceneManager:
         self._post_process(video.position)
 
         return video.frame_number - start_frame_num
+
+    def _opt_14(
+        self,
+        video: VideoStream,
+        frame_skip: int,
+        downscale_factor: float,
+        end_time: FrameTimecode | None,
+        callback: ty.Callable[[np.ndarray, FrameTimecode], None] | None,
+    ) -> list[float] | None:
+        if frame_skip > 0 or callback is not None or self._crop is not None:
+            return None
+        if self._stats_manager is not None or end_time is not None:
+            return None
+        if len(self._detector_list) != 1:
+            return None
+        config = getattr(self._detector_list[0], "opt_11", None)
+        if not config:
+            return None
+        path = getattr(video, "path", None)
+        if (getattr(type(video), "BACKEND_NAME", None) != "opencv" or not path
+                or not os.path.exists(path) or not video.is_seekable):
+            return None
+        if video.frame_number != 0 or video.duration is None:
+            return None
+        workers = opt_13.opt_3(video.duration.frame_num)
+        if workers < 2:
+            return None
+        logger.debug("Scoring frames (%d).", workers)
+        return opt_13.opt_18(
+            path=path,
+            n_frames=video.duration.frame_num,
+            opt_4=workers,
+            weights=config["weights"],
+            downscale_factor=downscale_factor,
+            interpolation=self._interpolation.value,
+        )
+
+    def _opt_15(
+        self,
+        scores: list[float],
+        video: VideoStream,
+        start_frame_num: int,
+        progress_bar,
+    ) -> int:
+        detector = self._detector_list[0]
+        self._frame_size = video.frame_size
+        for offset, score in enumerate(scores):
+            position = self._base_timecode + (start_frame_num + offset)
+            if self._start_pos is None:
+                self._start_pos = position
+            cuts = detector.process_score(position, score)
+            self._cutting_list += cuts
+            if progress_bar is not None:
+                if cuts:
+                    progress_bar.set_description(
+                        PROGRESS_BAR_DESCRIPTION % len(self._cutting_list), refresh=False
+                    )
+                progress_bar.update(1)
+        if progress_bar is not None:
+            progress_bar.set_description(
+                PROGRESS_BAR_DESCRIPTION % len(self._cutting_list), refresh=True
+            )
+            progress_bar.close()
+        self._last_pos = self._base_timecode + (start_frame_num + max(0, len(scores) - 1))
+        self._post_process(self._last_pos)
+        return len(scores)
 
     def _decode_thread(
         self,

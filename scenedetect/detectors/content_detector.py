@@ -137,6 +137,7 @@ class ContentDetector(SceneDetector):
                 raise ValueError("kernel_size must be odd integer >= 3")
             self._kernel = numpy.ones((kernel_size, kernel_size), numpy.uint8)
         self._frame_score: float | None = None
+        self._last_hsv: numpy.ndarray | None = None
         # TODO(https://scenedetect.com/issue/168): Figure out a better long term plan for handling
         # `min_scene_len` which should be specified in seconds, not frames.
         self._flash_filter = FlashFilter(mode=filter_mode, length=min_scene_len)
@@ -151,12 +152,15 @@ class ContentDetector(SceneDetector):
         # TODO: Investigate methods of performing cheaper alternatives, e.g. shifting or resizing
         # the frame to simulate camera movement, using optical flow, etc...
 
-        # Convert image into HSV colorspace.
-        hue, sat, lum = cv2.split(cv2.cvtColor(frame_img, cv2.COLOR_BGR2HSV))
-
         # Performance: Only calculate edges if we have to.
         calculate_edges: bool = (self._weights.delta_edges > 0.0) or self.stats_manager is not None
-        edges = self._detect_edges(lum) if calculate_edges else None
+
+        if not calculate_edges:
+            return self._opt_12(frame_img)
+
+        # Convert image into HSV colorspace.
+        hue, sat, lum = cv2.split(cv2.cvtColor(frame_img, cv2.COLOR_BGR2HSV))
+        edges = self._detect_edges(lum)
 
         if self._last_frame is None:
             # Need another frame to compare with for score calculation.
@@ -203,12 +207,53 @@ class ContentDetector(SceneDetector):
            ty.List[int]: List of frames where scene cuts have been detected. There may be 0
             or more frames in the list, and not necessarily the same as frame_num.
         """
-        self._frame_score = self._calculate_frame_score(timecode, frame_img)
-        if self._frame_score is None:
+        frame_score = self._calculate_frame_score(timecode, frame_img)
+        if frame_score is None:
             return []
+        return self._decide(timecode, frame_score)
 
+    def process_score(self, timecode: FrameTimecode, frame_score: float) -> list[FrameTimecode]:
+        return self._decide(timecode, frame_score)
+
+    def _decide(self, timecode: FrameTimecode, frame_score: float) -> list[FrameTimecode]:
+        self._frame_score = frame_score
         above_threshold: bool = self._frame_score >= self._threshold
         return self._flash_filter.filter(timecode=timecode, above_threshold=above_threshold)
+
+    @property
+    def opt_11(self) -> dict | None:
+        if self._weights.delta_edges > 0.0 or self.stats_manager is not None:
+            return None
+        return {"weights": tuple(self._weights)}
+
+    def _opt_12(self, frame_img: numpy.ndarray) -> float:
+        """`_calculate_frame_score` for the no-edge-map case, on the packed frame.
+
+        `cv2.absdiff` on the 3-channel uint8 image is |a - b| exactly (uint8 saturates
+        the same way in both directions), and `cv2.sumElems` returns the per-channel
+        integer sums; dividing each by the pixel count gives precisely the values
+        `_mean_pixel_distance` returns for the split planes, so the frame score --
+        and every cut decided from it -- is unchanged.
+        """
+        hsv = cv2.cvtColor(frame_img, cv2.COLOR_BGR2HSV)
+        last_hsv = self._last_hsv
+        self._last_hsv = hsv
+        if last_hsv is None:
+            # Need another frame to compare with for score calculation.
+            return 0.0
+
+        num_pixels: float = float(hsv.shape[0] * hsv.shape[1])
+        channel_sums = cv2.sumElems(cv2.absdiff(hsv, last_hsv))
+        score_components = ContentDetector.Components(
+            delta_hue=channel_sums[0] / num_pixels,
+            delta_sat=channel_sums[1] / num_pixels,
+            delta_lum=channel_sums[2] / num_pixels,
+            delta_edges=0.0,
+        )
+        return sum(
+            component * weight
+            for (component, weight) in zip(score_components, self._weights, strict=True)
+        ) / sum(abs(weight) for weight in self._weights)
 
     def _detect_edges(self, lum: numpy.ndarray) -> numpy.ndarray:
         """Detect edges using the luma channel of a frame.

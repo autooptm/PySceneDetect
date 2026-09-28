@@ -99,7 +99,13 @@ class AdaptiveDetector(ContentDetector):
 
     def process_frame(self, timecode: FrameTimecode, frame_img: np.ndarray) -> list[FrameTimecode]:
         super().process_frame(timecode=timecode, frame_img=frame_img)
+        return self._detect_adaptive(timecode)
 
+    def process_score(self, timecode: FrameTimecode, frame_score: float) -> list[FrameTimecode]:
+        super().process_score(timecode, frame_score)
+        return self._detect_adaptive(timecode)
+
+    def _detect_adaptive(self, timecode: FrameTimecode) -> list[FrameTimecode]:
         # If the parent could not calculate a frame score, there's nothing to buffer.
         if self._frame_score is None:
             return []

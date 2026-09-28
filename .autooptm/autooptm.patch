@@ -1,0 +1,417 @@
+diff --git a/scenedetect/_opt_score.py b/scenedetect/_opt_score.py
+new file mode 100644
+index 0000000..048ae2c
+--- /dev/null
++++ b/scenedetect/_opt_score.py
+@@ -0,0 +1,165 @@
++#
++#         PySceneDetect: Python-Based Video Scene Detector
++#   ---------------------------------------------------------------
++#     [  Site: https://scenedetect.com                           ]
++#     [  Docs: https://scenedetect.com/docs/                     ]
++#     [  Github: https://github.com/Breakthrough/PySceneDetect/   ]
++#
++# Copyright (C) 2014 Brandon Castellano <http://www.bcastell.com>.
++# PySceneDetect is licensed under the BSD 3-Clause License; see the
++# included LICENSE file, or visit one of the above pages for details.
++#
++
++import logging
++import os
++import typing as ty
++
++import cv2
++
++logger = logging.getLogger("pyscenedetect")
++
++DEFAULT_MIN_FRAMES: int = 1000
++
++OPT_5: int = 8
++
++OPT_6: int = 250
++
++
++def opt_3(n_frames: int) -> int:
++    override = os.environ.get("SCENEDETECT_OPT_1")
++    if override is not None:
++        try:
++            requested = int(override)
++        except ValueError:
++            logger.warning("Ignoring invalid SCENEDETECT_OPT_1=%s", override)
++            return 0
++        return requested if requested > 1 else 0
++    if n_frames < DEFAULT_MIN_FRAMES:
++        return 0
++    return max(0, min(OPT_5, (os.cpu_count() or 1) - 1,
++                      n_frames // OPT_6))
++
++
++def _keyframes(path: str) -> list[int]:
++    """Frame indices that start a keyframe, by DEMUXING only -- no frame is
++    decoded, so this is milliseconds for a whole file. Empty if PyAV is absent,
++    in which case the split falls back to equal frame ranges."""
++    try:
++        import av
++    except ImportError:
++        return []
++    try:
++        with av.open(path) as container:
++            stream = container.streams.video[0]
++            keyframes, index = [], 0
++            for packet in container.demux(stream):
++                if packet.pts is None:
++                    continue
++                if packet.is_keyframe:
++                    keyframes.append(index)
++                index += 1
++            return keyframes
++    except Exception as ex:                     # a container we cannot index is not fatal
++        logger.debug("Could not index keyframes (%s); using an even split.", ex)
++        return []
++
++
++def opt_17(n_frames: int, keyframes: ty.Sequence[int],
++                   opt_4: int) -> list[tuple[int, int | None]]:
++    starts = [0]
++    usable = [k for k in keyframes if 0 < k < n_frames]
++    if len(usable) >= opt_4 - 1:
++        step = len(usable) / float(opt_4)
++        starts += [usable[min(len(usable) - 1, int(round(i * step)))]
++                   for i in range(1, opt_4)]
++    else:
++        per = n_frames / float(opt_4)
++        starts += [int(round(i * per)) for i in range(1, opt_4)]
++    starts = sorted({start for start in starts if 0 <= start < n_frames})
++    return [(start, starts[i + 1] if i + 1 < len(starts) else None)
++            for i, start in enumerate(starts)]
++
++
++def _seek_exact(cap: cv2.VideoCapture, target: int) -> int:
++    """Position `cap` so that the next read() returns frame `target`."""
++    if target <= 0:
++        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
++        return 0
++    cap.set(cv2.CAP_PROP_POS_FRAMES, target)
++    position = int(round(cap.get(cv2.CAP_PROP_POS_FRAMES)))
++    if position > target:                       # overshot: walk from the start
++        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
++        position = 0
++    while position < target:
++        if not cap.grab():
++            break
++        position += 1
++    return position
++
++
++def _opt_16(task):
++    path, start, end, weights, downscale_factor, interpolation = task
++    cv2.setNumThreads(1)
++    cap = cv2.VideoCapture(path)
++    try:
++        index = _seek_exact(cap, max(0, start - 1))
++        scores: list[float] = []
++        last_hsv = None
++        weight_sum = sum(abs(weight) for weight in weights)
++        while end is None or index < end:
++            grabbed, frame = cap.read()
++            if not grabbed:
++                break
++            if downscale_factor > 1.0:
++                frame = cv2.resize(
++                    frame,
++                    (max(1, round(frame.shape[1] / downscale_factor)),
++                     max(1, round(frame.shape[0] / downscale_factor))),
++                    interpolation=interpolation,
++                )
++            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
++            if last_hsv is None:
++                score = 0.0
++            else:
++                num_pixels = float(hsv.shape[0] * hsv.shape[1])
++                channel_sums = cv2.sumElems(cv2.absdiff(hsv, last_hsv))
++                score = (
++                    channel_sums[0] / num_pixels * weights[0]
++                    + channel_sums[1] / num_pixels * weights[1]
++                    + channel_sums[2] / num_pixels * weights[2]
++                    + 0.0 * weights[3]
++                ) / weight_sum
++            last_hsv = hsv
++            if index >= start:
++                scores.append(score)
++            index += 1
++        return start, scores
++    finally:
++        cap.release()
++
++
++def opt_18(path: str, n_frames: int, opt_4: int, weights,
++                 downscale_factor: float, interpolation: int) -> list[float] | None:
++    import multiprocessing
++
++    bounds = opt_17(n_frames, _keyframes(path), opt_4)
++    if len(bounds) < 2:
++        return None
++    tasks = [(path, start, end, tuple(weights), downscale_factor, interpolation)
++             for start, end in bounds]
++    try:
++        context = multiprocessing.get_context("fork")
++    except ValueError:                          # platforms without fork
++        return None
++    try:
++        with context.Pool(len(tasks)) as opt_7:
++            results = opt_7.map(_opt_16, tasks)
++    except Exception as ex:
++        logger.warning("Optimized scoring failed (%s); falling back to the stock reader.", ex)
++        return None
++    scores: list[float] = []
++    for _start, segment in sorted(results, key=lambda item: item[0]):
++        scores.extend(segment)
++    logger.debug("Scored %d frames in %d segments (%d).",
++                 len(scores), len(bounds), len(tasks))
++    return scores
+diff --git a/scenedetect/backends/opencv.py b/scenedetect/backends/opencv.py
+index 83cd60a..3ccd888 100644
+--- a/scenedetect/backends/opencv.py
++++ b/scenedetect/backends/opencv.py
+@@ -54,6 +54,22 @@ NON_VIDEO_FILE_INPUT_IDENTIFIERS = (
+ )
+ 
+ 
++OPT_10: int = 2
++
++
++def _opt_8() -> int:
++    try:
++        return int(os.environ.get("SCENEDETECT_OPT_2", OPT_10))
++    except ValueError:
++        return OPT_10
++
++
++def _opt_9(cap: cv2.VideoCapture) -> None:
++    threads = _opt_8()
++    if threads > 0 and hasattr(cv2, "CAP_PROP_N_THREADS"):
++        cap.set(cv2.CAP_PROP_N_THREADS, threads)
++
++
+ def _get_aspect_ratio(cap: cv2.VideoCapture, epsilon: float = 0.0001) -> float:
+     """Display/pixel aspect ratio of the VideoCapture as a float (1.0 represents square pixels)."""
+     # Versions of OpenCV < 3.4.1 do not support this, so we fall back to 1.0.
+@@ -337,6 +353,7 @@ class VideoStreamCv2(VideoStream):
+             raise VideoOpenFailure(
+                 "Ensure file is valid video and system dependencies are up to date.\n"
+             )
++        _opt_9(cap)
+ 
+         # Display an error if the video codec type seems unsupported (#86) as this indicates
+         # potential video corruption, or may explain missing frames. We only perform this check
+diff --git a/scenedetect/detectors/adaptive_detector.py b/scenedetect/detectors/adaptive_detector.py
+index 8f3f580..caa9226 100644
+--- a/scenedetect/detectors/adaptive_detector.py
++++ b/scenedetect/detectors/adaptive_detector.py
+@@ -99,7 +99,13 @@ class AdaptiveDetector(ContentDetector):
+ 
+     def process_frame(self, timecode: FrameTimecode, frame_img: np.ndarray) -> list[FrameTimecode]:
+         super().process_frame(timecode=timecode, frame_img=frame_img)
++        return self._detect_adaptive(timecode)
+ 
++    def process_score(self, timecode: FrameTimecode, frame_score: float) -> list[FrameTimecode]:
++        super().process_score(timecode, frame_score)
++        return self._detect_adaptive(timecode)
++
++    def _detect_adaptive(self, timecode: FrameTimecode) -> list[FrameTimecode]:
+         # If the parent could not calculate a frame score, there's nothing to buffer.
+         if self._frame_score is None:
+             return []
+diff --git a/scenedetect/detectors/content_detector.py b/scenedetect/detectors/content_detector.py
+index b666f8c..9c5f828 100644
+--- a/scenedetect/detectors/content_detector.py
++++ b/scenedetect/detectors/content_detector.py
+@@ -137,6 +137,7 @@ class ContentDetector(SceneDetector):
+                 raise ValueError("kernel_size must be odd integer >= 3")
+             self._kernel = numpy.ones((kernel_size, kernel_size), numpy.uint8)
+         self._frame_score: float | None = None
++        self._last_hsv: numpy.ndarray | None = None
+         # TODO(https://scenedetect.com/issue/168): Figure out a better long term plan for handling
+         # `min_scene_len` which should be specified in seconds, not frames.
+         self._flash_filter = FlashFilter(mode=filter_mode, length=min_scene_len)
+@@ -151,12 +152,15 @@ class ContentDetector(SceneDetector):
+         # TODO: Investigate methods of performing cheaper alternatives, e.g. shifting or resizing
+         # the frame to simulate camera movement, using optical flow, etc...
+ 
+-        # Convert image into HSV colorspace.
+-        hue, sat, lum = cv2.split(cv2.cvtColor(frame_img, cv2.COLOR_BGR2HSV))
+-
+         # Performance: Only calculate edges if we have to.
+         calculate_edges: bool = (self._weights.delta_edges > 0.0) or self.stats_manager is not None
+-        edges = self._detect_edges(lum) if calculate_edges else None
++
++        if not calculate_edges:
++            return self._opt_12(frame_img)
++
++        # Convert image into HSV colorspace.
++        hue, sat, lum = cv2.split(cv2.cvtColor(frame_img, cv2.COLOR_BGR2HSV))
++        edges = self._detect_edges(lum)
+ 
+         if self._last_frame is None:
+             # Need another frame to compare with for score calculation.
+@@ -203,13 +207,54 @@ class ContentDetector(SceneDetector):
+            ty.List[int]: List of frames where scene cuts have been detected. There may be 0
+             or more frames in the list, and not necessarily the same as frame_num.
+         """
+-        self._frame_score = self._calculate_frame_score(timecode, frame_img)
+-        if self._frame_score is None:
++        frame_score = self._calculate_frame_score(timecode, frame_img)
++        if frame_score is None:
+             return []
++        return self._decide(timecode, frame_score)
++
++    def process_score(self, timecode: FrameTimecode, frame_score: float) -> list[FrameTimecode]:
++        return self._decide(timecode, frame_score)
+ 
++    def _decide(self, timecode: FrameTimecode, frame_score: float) -> list[FrameTimecode]:
++        self._frame_score = frame_score
+         above_threshold: bool = self._frame_score >= self._threshold
+         return self._flash_filter.filter(timecode=timecode, above_threshold=above_threshold)
+ 
++    @property
++    def opt_11(self) -> dict | None:
++        if self._weights.delta_edges > 0.0 or self.stats_manager is not None:
++            return None
++        return {"weights": tuple(self._weights)}
++
++    def _opt_12(self, frame_img: numpy.ndarray) -> float:
++        """`_calculate_frame_score` for the no-edge-map case, on the packed frame.
++
++        `cv2.absdiff` on the 3-channel uint8 image is |a - b| exactly (uint8 saturates
++        the same way in both directions), and `cv2.sumElems` returns the per-channel
++        integer sums; dividing each by the pixel count gives precisely the values
++        `_mean_pixel_distance` returns for the split planes, so the frame score --
++        and every cut decided from it -- is unchanged.
++        """
++        hsv = cv2.cvtColor(frame_img, cv2.COLOR_BGR2HSV)
++        last_hsv = self._last_hsv
++        self._last_hsv = hsv
++        if last_hsv is None:
++            # Need another frame to compare with for score calculation.
++            return 0.0
++
++        num_pixels: float = float(hsv.shape[0] * hsv.shape[1])
++        channel_sums = cv2.sumElems(cv2.absdiff(hsv, last_hsv))
++        score_components = ContentDetector.Components(
++            delta_hue=channel_sums[0] / num_pixels,
++            delta_sat=channel_sums[1] / num_pixels,
++            delta_lum=channel_sums[2] / num_pixels,
++            delta_edges=0.0,
++        )
++        return sum(
++            component * weight
++            for (component, weight) in zip(score_components, self._weights, strict=True)
++        ) / sum(abs(weight) for weight in self._weights)
++
+     def _detect_edges(self, lum: numpy.ndarray) -> numpy.ndarray:
+         """Detect edges using the luma channel of a frame.
+ 
+diff --git a/scenedetect/scene_manager.py b/scenedetect/scene_manager.py
+index 05ba8dc..98c6700 100644
+--- a/scenedetect/scene_manager.py
++++ b/scenedetect/scene_manager.py
+@@ -77,6 +77,7 @@ analysis of the video.
+ """
+ 
+ import logging
++import os
+ import queue
+ import sys
+ import threading
+@@ -98,6 +99,7 @@ from scenedetect.detector import SceneDetector
+ 
+ # TODO(v0.8): Remove the import * below, for backwards compatibility with v0.6 only.
+ from scenedetect.output import *  # noqa: F403
++from scenedetect import _opt_score as opt_13
+ from scenedetect.platform import tqdm
+ from scenedetect.stats_manager import StatsManager
+ from scenedetect.video_stream import VideoStream
+@@ -562,6 +564,10 @@ class SceneManager:
+                 dynamic_ncols=True,
+             )
+ 
++        scores = self._opt_14(video, frame_skip, downscale_factor, end_time, callback)
++        if scores is not None:
++            return self._opt_15(scores, video, start_frame_num, progress_bar)
++
+         frame_queue = queue.Queue(MAX_FRAME_QUEUE_LENGTH)
+         self._stop.clear()
+         decode_thread = threading.Thread(
+@@ -622,6 +628,72 @@ class SceneManager:
+ 
+         return video.frame_number - start_frame_num
+ 
++    def _opt_14(
++        self,
++        video: VideoStream,
++        frame_skip: int,
++        downscale_factor: float,
++        end_time: FrameTimecode | None,
++        callback: ty.Callable[[np.ndarray, FrameTimecode], None] | None,
++    ) -> list[float] | None:
++        if frame_skip > 0 or callback is not None or self._crop is not None:
++            return None
++        if self._stats_manager is not None or end_time is not None:
++            return None
++        if len(self._detector_list) != 1:
++            return None
++        config = getattr(self._detector_list[0], "opt_11", None)
++        if not config:
++            return None
++        path = getattr(video, "path", None)
++        if (getattr(type(video), "BACKEND_NAME", None) != "opencv" or not path
++                or not os.path.exists(path) or not video.is_seekable):
++            return None
++        if video.frame_number != 0 or video.duration is None:
++            return None
++        workers = opt_13.opt_3(video.duration.frame_num)
++        if workers < 2:
++            return None
++        logger.debug("Scoring frames (%d).", workers)
++        return opt_13.opt_18(
++            path=path,
++            n_frames=video.duration.frame_num,
++            opt_4=workers,
++            weights=config["weights"],
++            downscale_factor=downscale_factor,
++            interpolation=self._interpolation.value,
++        )
++
++    def _opt_15(
++        self,
++        scores: list[float],
++        video: VideoStream,
++        start_frame_num: int,
++        progress_bar,
++    ) -> int:
++        detector = self._detector_list[0]
++        self._frame_size = video.frame_size
++        for offset, score in enumerate(scores):
++            position = self._base_timecode + (start_frame_num + offset)
++            if self._start_pos is None:
++                self._start_pos = position
++            cuts = detector.process_score(position, score)
++            self._cutting_list += cuts
++            if progress_bar is not None:
++                if cuts:
++                    progress_bar.set_description(
++                        PROGRESS_BAR_DESCRIPTION % len(self._cutting_list), refresh=False
++                    )
++                progress_bar.update(1)
++        if progress_bar is not None:
++            progress_bar.set_description(
++                PROGRESS_BAR_DESCRIPTION % len(self._cutting_list), refresh=True
++            )
++            progress_bar.close()
++        self._last_pos = self._base_timecode + (start_frame_num + max(0, len(scores) - 1))
++        self._post_process(self._last_pos)
++        return len(scores)
++
+     def _decode_thread(
+         self,
+         video: VideoStream,

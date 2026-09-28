@@ -1,3 +1,64 @@
+<div align="center">
+  <a href="https://autooptm.com"><img src=".autooptm/logo.png" width="96" alt="AutoOptm"></a>
+
+  <h1>PySceneDetect · optimized by <a href="https://autooptm.com">AutoOptm</a></h1>
+
+  <p><b>1.86x faster end to end</b> on the command below, output verified against the stock program.</p>
+
+  <p>
+    <a href="https://autooptm.com"><img alt="speedup" src="https://img.shields.io/badge/end--to--end-1.86x-2ea44f"></a>
+    <a href="https://github.com/Breakthrough/PySceneDetect/commit/2fa8290de0353d371eaae92a8a6efb69d16a1e0c"><img alt="base" src="https://img.shields.io/badge/upstream-2fa8290de035-blue"></a>
+    <img alt="card" src="https://img.shields.io/badge/measured%20on-NVIDIA%20RTX%204090-lightgrey">
+  </p>
+</div>
+
+> This is a fork of [Breakthrough/PySceneDetect](https://github.com/Breakthrough/PySceneDetect) at commit
+> [`2fa8290de035`](https://github.com/Breakthrough/PySceneDetect/commit/2fa8290de0353d371eaae92a8a6efb69d16a1e0c) with the AutoOptm patch applied on top.
+> The optimisation was found, measured and verified automatically by [AutoOptm](https://autooptm.com);
+> the patch is kept under [`.autooptm/`](.autooptm/).
+
+Every optimisation is on by default and the command runs unchanged — same file, same flags, same outputs. Every change is behind a switch that defaults on; see `.autooptm/autooptm.patch`.
+
+## The result — `python scenedetect/__main__.py -i demo.mp4 detect-adaptive list-scenes -n`
+
+| | |
+|---|---|
+| **Command** | `python scenedetect/__main__.py -i demo.mp4 detect-adaptive list-scenes -n` |
+| **Entry point** | `scenedetect/__main__.py` |
+| **Unit measured** | one clip scored with detect-adaptive end to end (decode → per-frame score → cut decision → scene list) |
+| **Before (stock)** | 1.944 (as reported) per unit |
+| **After (this tree, all switches default ON)** | 1.037 (as reported) per unit |
+| **Speedup** | **1.86x** end to end on NVIDIA RTX 4090, host noise floor 2.1% |
+| **Output** | bit-identical: scores max_abs_diff = 0 and the cut list identical to stock |
+
+### What changed
+
+| File | Where | Gain (alone) |
+|---|---|---|
+| `scenedetect/detectors/content_detector.py` | ContentDetector._calculate_frame_score / _opt_12 | 1.1496x |
+| `scenedetect/detectors/content_detector.py` | ContentDetector.process_score / _decide | 1.0x |
+| `scenedetect/detectors/adaptive_detector.py` | AdaptiveDetector.process_score / _detect_adaptive | 1.0x |
+| `scenedetect/_opt_score.py` | new module | 1.87x |
+| `scenedetect/scene_manager.py` | SceneManager.detect_scenes | 1.87x |
+
+
+## Reproduce
+
+```bash
+git clone https://github.com/autooptm/PySceneDetect-ao.git
+cd PySceneDetect-ao
+# set up exactly as upstream documents, then:
+python scenedetect/__main__.py -i demo.mp4 detect-adaptive list-scenes -n
+```
+
+`git diff 2fa8290de035` is the same change as the patch file under `.autooptm/`.
+
+---
+
+<div align="center"><sub>Optimized by <a href="https://autooptm.com">AutoOptm</a> — point it at a repository, get back a verified speedup and the patch.</sub></div>
+
+---
+
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Breakthrough/PySceneDetect/main/website/pages/img/pyscenedetect_logo_small_darkmode.png">
